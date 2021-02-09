@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+"""An ncurses TUI for running Python doctests."""
+
+import sys
+import os
+import curses
+import doctest
+import contextlib
+import importlib.util
+from typing import Any
+
+
+def main(stdscr) -> None:
+    """Run the main process of the application."""
+    # Initial setup
+    stdscr.clear()
+
+    # Disable cursor blinking
+    curses.curs_set(0)
+    stdscr.keypad(1)
+    curses.mousemask(1)
+
+    # Declare colours
+    # Set default colours and background
+    curses.use_default_colors()
+    curses.init_pair(1, -1, -1)
+    stdscr.bkgd(' ', curses.color_pair(1))
+
+    # Create error/missing diff text colour pair
+    curses.init_pair(2, curses.COLOR_RED, -1)
+
+    # Create focused text colour pair
+    curses.init_pair(3, curses.COLOR_BLUE, -1)
+
+    # Create highlighted text colour pair
+    curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_WHITE)
+
+    # Created highlighted error diff text colour pair
+    curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_RED)
+
+    # Create added diff text colour pair
+    curses.init_pair(6, curses.COLOR_YELLOW, -1)
+
+    # Created docstring text colour pari
+    curses.init_pair(7, curses.COLOR_GREEN, -1)
+
+    # Create file names
+    paths = sys.argv[1:]
+
+    files = Files(stdscr.getmaxyx(), paths)
+    functions = Functions(stdscr.getmaxyx(), paths)
+    output = Output(stdscr.getmaxyx(), [])
+
+    functions.update_tests()
+    functions.set_output_text(output)
+
+    # Start main event loop
+    while True:
+        event = output.pad.getch()
+        if event == ord('q'):
+            break
+        elif event == ord('\t'):
+            focus_next([files, functions, output])
+        elif event == 353:  # Shift tab
+            focus_next([files, functions, output], True)
+        elif event == ord('k') or event == 259:
+            if files.focused:
+                files.nav_up()
+            elif functions.focused:
+                functions.nav_up(output)
+        elif event == ord('j') or event == 258:
+            if files.focused:
+                files.nav_down()
+            elif functions.focused:
+                functions.nav_down(output)
+        elif (event == ord('l') or event == 261) and files.focused:
+            focus_next([files, functions, output], True)
+        elif (event == ord('l') or event == 261) and functions.focused:
+            focus_next([files, functions, output])
+        elif (event == ord('h') or event == 260) and output.focused:
+            focus_next([files, functions, output], True)
+        elif event == ord('r'):
+            functions.update_tests()
+        elif event == curses.KEY_RESIZE:
+            x, y = os.get_terminal_size()
+            curses.resize_term(y, x)
+            files.screen_yx = stdscr.getmaxyx()
+            functions.screen_yx = stdscr.getmaxyx()
+            output.screen_yx = stdscr.getmaxyx()
+            files.draw()
+            functions.draw()
+            output.draw()
+        # else:
+        #     stdscr.addstr(0, 0, str(event))
+        #     stdscr.refresh()
+
+
+class Files():
+    """A class to keep track of and display the given file paths."""
+    screen_yx: tuple[int, int]
+    pad: Any
+    focused: bool = False
+    paths: list[str]
+    selected: int = 0
+    scrolled: int = 0
+
+    def __init__(self, screen_yx: tuple[int, int], paths: list[str]) -> None:
+        self.screen_yx = screen_yx
+        self.paths = paths
+
+        self.draw()
+
+    def draw(self) -> None:
+        """Draw this object's pad."""
+        _, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+        title_rows = min(7, len(self.paths) + 2)
+
+        self.pad = curses.newpad(title_rows, left_cols)
+        self.pad.keypad(1)
+        self.pad.border(curses.ACS_VLINE, curses.ACS_VLINE, curses.ACS_HLINE,
+                        curses.ACS_HLINE, curses.ACS_ULCORNER,
+                        curses.ACS_URCORNER, curses.ACS_LLCORNER,
+                        curses.ACS_LRCORNER)
+
+        self.draw_paths()
+
+        self.draw_title()
+
+    def draw_paths(self) -> None:
+        """Draw the specified paths."""
+        _, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+        title_rows = min(7, len(self.paths) + 2)
+
+        for i in range(0, title_rows - 2):
+            curr_path = self.paths[i + self.scrolled]
+            if os.path.exists(curr_path) and \
+                    i + self.scrolled == self.selected and self.focused:
+                pair = 4
+            elif os.path.exists(curr_path):
+                pair = 1
+            elif i + self.scrolled == self.selected and self.focused:
+                pair = 5
+            else:
+                pair = 2
+
+            if len(curr_path) > left_cols - 2:
+                trimmed_path = '...' + curr_path[-(left_cols - 5):]
+                self.pad.addnstr(i + 1, 1, trimmed_path, left_cols - 2,
+                                 curses.color_pair(pair))
+            else:
+                self.pad.addnstr(i + 1, 1, curr_path, left_cols - 2,
+                                 curses.color_pair(pair))
+
+        self.pad.refresh(0, 0, 0, 0, title_rows, left_cols)
+
+    def draw_title(self) -> None:
+        """Draw this object's title."""
+        _, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+        title_rows = min(7, len(self.paths) + 2)
+
+        if self.focused:
+            self.pad.addnstr(0, 2, "doctest tui", 11, curses.color_pair(3))
+        else:
+            self.pad.addnstr(0, 2, "doctest tui", 11)
+
+        self.pad.refresh(0, 0, 0, 0, title_rows, left_cols)
+
+    def nav_up(self) -> None:
+        """Navigate up one item."""
+        if self.selected > 0:
+            self.selected -= 1
+            if self.scrolled > self.selected:
+                self.scrolled -= 1
+            self.pad.erase()
+            self.draw()
+
+    def nav_down(self) -> None:
+        """Navigate down one item."""
+        title_rows = min(7, len(self.paths) + 2)
+
+        if self.selected < len(self.paths) - 1:
+            self.selected += 1
+            if self.scrolled + title_rows - 2 <= self.selected:
+                self.scrolled += 1
+            self.pad.erase()
+            self.draw()
+
+
+class Functions():
+    """A class to keep track of and display the functions found in the given
+    files, and the results of their tests."""
+    screen_yx: tuple[int, int]
+    pad: Any
+    focused: bool = True
+    paths: list[str]
+    results: dict[str, list[dict]] = {}
+    names: list[str] = []
+    scroll_pos: list[int] = []
+    runner: doctest.DocTestRunner
+    selected: int = 0
+    scrolled: int = 0
+    diffs: list = []
+
+    def __init__(self, screen_yx: tuple[int, int], paths: list[str]) -> None:
+        self.screen_yx = screen_yx
+        self.paths = paths
+
+        self.draw()
+
+    def draw(self) -> None:
+        """Draw this object's pad."""
+        rows, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+        title_rows = min(7, len(self.paths) + 2)
+
+        self.pad = curses.newpad(rows - title_rows, left_cols)
+        self.pad.keypad(1)
+        self.pad.border(curses.ACS_VLINE, curses.ACS_VLINE, curses.ACS_HLINE,
+                        curses.ACS_HLINE, curses.ACS_ULCORNER,
+                        curses.ACS_URCORNER, curses.ACS_LLCORNER,
+                        curses.ACS_LRCORNER)
+
+        self.draw_results()
+
+        self.draw_title()
+
+    def draw_title(self) -> None:
+        """Draw this object's title."""
+        rows, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+        title_rows = min(7, len(self.paths) + 2)
+
+        if self.focused:
+            self.pad.addnstr(0, 2, 'functions', 9, curses.color_pair(3))
+        else:
+            self.pad.addnstr(0, 2, 'functions', 9)
+
+        self.pad.refresh(0, 0, title_rows, 0, rows, left_cols)
+
+    def update_tests(self) -> None:
+        """Run an update tests for stored paths."""
+        self.results = {}
+        tests_so_far = []
+
+        with contextlib.redirect_stderr(open(os.devnull, 'w')):
+            with contextlib.redirect_stdout(open(os.devnull, 'w')):
+                for file in [path for path in self.paths
+                             if os.path.exists(path)]:
+                    try:
+                        curr_module_name = \
+                            ''.join(file.split('/')[-1].split('.')[:-1])
+                        curr_spec = importlib.util.spec_from_file_location(
+                            curr_module_name, file)
+                        curr_module = importlib.util.module_from_spec(curr_spec)
+                        curr_spec.loader.exec_module(curr_module)
+
+                        finder = doctest.DocTestFinder()
+
+                        tests_so_far.extend(finder.find(curr_module))
+                    except:
+                        pass
+
+                runner = NDiffRunner(self)
+                for test in [test for test in tests_so_far
+                             if len(test.examples) > 0]:
+                    runner.run(test)
+
+                self.names = [test.name for test in tests_so_far
+                              if len(test.examples) > 0]
+
+        self.draw_results()
+
+    def draw_results(self) -> None:
+        """Draw the results of the tests."""
+        rows, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+        title_rows = min(7, len(self.paths) + 2)
+        results_rows = rows - title_rows
+
+        for i in range(0, min(results_rows - 2, len(self.names))):
+            result_name = self.names[i + self.scrolled]
+            result = self.results[result_name]
+            result_attempts = len(result)
+            result_failures = len([example for example in result
+                                   if example['failed']])
+            if result_failures > 0 and i + self.scrolled == self.selected \
+                    and self.focused:
+                pair = 5
+            elif result_failures > 0:
+                pair = 2
+            elif i + self.scrolled == self.selected and self.focused:
+                pair = 4
+            else:
+                pair = 1
+
+            ratio = f'{result_attempts - result_failures}/{result_attempts}'
+            full_result = f'{result_name} {ratio}'
+
+            if len(full_result) > left_cols - 2:
+                trimmed_result = '...' + \
+                    result_name[-(left_cols - 6 - len(ratio)):] + ' ' + ratio
+                self.pad.addnstr(i + 1, 1, trimmed_result, left_cols - 2,
+                                 curses.color_pair(pair))
+            else:
+                extra_width = left_cols - 1 - len(full_result)
+                extended_result = result_name + ' ' * extra_width + ratio
+                self.pad.addnstr(i + 1, 1, extended_result, left_cols - 2,
+                                 curses.color_pair(pair))
+
+        self.pad.refresh(0, 0, title_rows, 0, rows, left_cols)
+
+    def nav_up(self, output) -> None:
+        """Navigate up one item."""
+        if self.selected > 0:
+            self.selected -= 1
+            if self.scrolled > self.selected:
+                self.scrolled -= 1
+
+            self.pad.erase()
+            self.draw()
+
+            self.pad.erase()
+            self.draw()
+            self.set_output_text(output)
+
+    def nav_down(self, output) -> None:
+        """Navigate down one item."""
+        rows, _ = self.screen_yx
+        title_rows = min(7, len(self.paths) + 2)
+        results_rows = rows - title_rows
+
+        if self.selected < len(self.names) - 1:
+            self.selected += 1
+            if self.scrolled + results_rows - 2 <= self.selected:
+                self.scrolled += 1
+
+            self.pad.erase()
+            self.draw()
+            self.set_output_text(output)
+
+    def set_output_text(self, output) -> None:
+        """Set the given output object's text property to the currently selected
+        function's output."""
+        if len(self.names) > self.selected:
+            result = self.results[self.names[self.selected]]
+            docstring = result[0]['test'].docstring.removesuffix('\n').split('\n')
+
+            indent = min(len(line) - len(line.lstrip()) for line in docstring[1:]
+                         if line != '')
+            output.text = [' ' * indent + docstring[0]]
+            for line in docstring[1:]:
+                if line.lstrip()[0:4] == '>>> ':
+                    break
+                else:
+                    output.text.append(line)
+            for example in result:
+                output.text.extend([' ' * indent + source for source
+                                    in example['source']])
+                output.text.extend([' ' * indent + source for source
+                                    in example['got']])
+
+            output.pad.erase()
+            output.draw()
+
+
+class Output():
+    """A class to display the docstrings of functions and outputs of tests."""
+    screen_yx: tuple[int, int]
+    pad: Any
+    focused: bool = False
+    text: list[str] = []
+
+    def __init__(self, screen_yx: tuple[int, int], text: list[str]) -> None:
+        self.screen_yx = screen_yx
+        if text:
+            self.text = text
+
+        self.draw()
+
+    def draw(self) -> None:
+        """Draw this object's pad."""
+        rows, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+        right_cols = cols - left_cols
+
+        self.pad = curses.newpad(rows, right_cols)
+        self.pad.keypad(1)
+        self.pad.border(curses.ACS_VLINE, curses.ACS_VLINE, curses.ACS_HLINE,
+                        curses.ACS_HLINE, curses.ACS_ULCORNER,
+                        curses.ACS_URCORNER, curses.ACS_LLCORNER,
+                        curses.ACS_LRCORNER)
+
+        self.draw_text()
+        self.draw_title()
+
+    def draw_title(self) -> None:
+        """Draw this object's title."""
+        rows, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+
+        if self.focused:
+            self.pad.addnstr(0, 2, 'output', 6, curses.color_pair(3))
+        else:
+            self.pad.addnstr(0, 2, 'output', 6)
+
+        self.pad.refresh(0, 0, 0, left_cols, rows, cols)
+
+    def draw_text(self) -> None:
+        """Draw this object's text property."""
+        rows, cols = self.screen_yx
+        left_cols = max(15, cols // 4)
+        right_cols = cols - left_cols
+
+        traceback = False
+        docstring = True
+
+        for i in range(0, min(rows - 2, len(self.text))):
+            line = self.text[i]
+            if line.lstrip()[0:4] == '>>> ':
+                pair = 1
+                traceback = False
+                docstring = False
+            elif docstring:
+                pair = 7
+            elif line.lstrip()[0:2] == '+ ':
+                pair = 6
+                traceback = False
+            elif line.lstrip()[0:2] == '- ':
+                pair = 2
+                traceback = False
+            elif line.lstrip() == 'Traceback (most recent call last):':
+                pair = 2
+                traceback = True
+            elif traceback:
+                pair = 2
+            else:
+                pair = 1
+
+            self.pad.addnstr(i + 1, 1, line, right_cols - 2,
+                             curses.color_pair(pair))
+
+        self.pad.refresh(0, 0, 0, left_cols, rows, cols)
+
+
+class NDiffRunner(doctest.DocTestRunner):
+    """A special doctest.DocTestRunner to pass reports to the Functions
+    class."""
+    functions: Functions
+
+    def __init__(self, functions: Functions) -> None:
+        super().__init__()
+        self.functions = functions
+
+    def report_success(self, out, test, example, got) -> None:
+        """
+        Report that the given example ran successfully.  (Only
+        displays a message if verbose=True)
+        """
+        if test.name not in self.functions.results:
+            self.functions.results[test.name] = []
+
+        self.functions.results[test.name].append({
+            'test': test,
+            'source': [f'>>> {line}' for line
+                       in example.source.removesuffix('\n').split('\n')],
+            'got': [output for output
+                    in got.removesuffix('\n').split('\n') if got != ''],
+            'failed': False
+        })
+
+    def report_failure(self, out, test, example, got) -> None:
+        """
+        Report that the given example failed.
+        """
+        if test.name not in self.functions.results:
+            self.functions.results[test.name] = []
+
+        diff = self._checker.output_difference(example, got,
+                                               doctest.REPORT_NDIFF)
+        prefix = 'Differences (ndiff with -expected +actual):\n'
+        diff_list = diff.removeprefix(prefix).removesuffix('\n').split('\n')
+
+        self.functions.results[test.name].append({
+            'test': test,
+            'source': [f'>>> {line}' for line
+                       in example.source.removesuffix('\n').split('\n')],
+            'got': [output.lstrip() for output in diff_list],
+            'failed': True
+        })
+
+    def report_unexpected_exception(self, out, test, example, exc_info) -> None:
+        """
+        Report that the given example raised an unexpected exception.
+        """
+        if test.name not in self.functions.results:
+            self.functions.results[test.name] = []
+
+        traceback = doctest._exception_traceback(exc_info)
+
+        self.functions.results[test.name].append({
+            'test': test,
+            'source': [f'>>> {line}' for line
+                       in example.source.removesuffix('\n').split('\n')],
+            'got': traceback.removesuffix('\n').split('\n'),
+            'failed': True
+        })
+
+
+def focus_next(pads: list, reverse: bool = False) -> None:
+    """Shift user focus to the next UI element."""
+    for i in range(0, len(pads)):
+        if pads[i].focused:
+            pads[i].focused = False
+            pads[i].draw_title()
+            if isinstance(pads[i], Files):
+                pads[i].draw_paths()
+
+            if reverse:
+                pads[(i - 1) % len(pads)].focused = True
+                pads[(i - 1) % len(pads)].draw_title()
+                if isinstance(pads[(i - 1) % len(pads)], Files):
+                    pads[(i - 1) % len(pads)].draw_paths()
+            else:
+                pads[(i + 1) % len(pads)].focused = True
+                pads[(i + 1) % len(pads)].draw_title()
+                if isinstance(pads[(i + 1) % len(pads)], Files):
+                    pads[(i + 1) % len(pads)].draw_paths()
+
+            break
+
+
+if __name__ == '__main__':
+    if '-h' in sys.argv or '--help' in sys.argv or len(sys.argv) == 1 \
+            or not any(os.path.exists(path) for path in sys.argv[1:]):
+        print('Usage: pass file name as input')
+    else:
+        curses.wrapper(main)
