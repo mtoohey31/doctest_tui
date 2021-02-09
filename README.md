@@ -6,6 +6,15 @@ Note that this may work perfectly fine for some use cases, but it is still in an
 "alpha" state and has some bugs, mainly that it does not successfully import
 some files, for reasons I have not yet debugged.
 
+See the screenshots below for a look at the UI, if the colour scheme isn't to
+your tastes, it just uses the same theme as your terminal, so no modifications
+are necessary.
+
+![diff_zenburn](./screenshots/diff_zenburn.png)
+*A screenshot showing "diffed" output from a failed test.*
+![traceback_zenburn](./screenshots/traceback_zenburn.png)
+*A screenshot showing tracebacks in a test that failed due to a raised error.*
+
 ## Usage
 
 Ensure that you have `python3` installed and on your path, then clone this
