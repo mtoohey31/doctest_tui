@@ -81,6 +81,7 @@ def main(stdscr) -> None:
             focus_next([files, functions, output], True)
         elif event == ord('r'):
             functions.update_tests()
+            functions.set_output_text(output)
         elif event == curses.KEY_RESIZE:
             x, y = os.get_terminal_size()
             curses.resize_term(y, x)
